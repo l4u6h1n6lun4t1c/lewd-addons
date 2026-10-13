@@ -38,7 +38,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 DEFAULT_MANIFEST = "https://github.com/l4u6h1n6lun4t1c/lewd-addons/releases/latest/download/index.json"
 ID_FILE = "lewd_addon.json"
 WANT_DIR = ("lewd_addons", "want")
@@ -115,13 +115,14 @@ def read_meta_version(mod_dir):
     return None
 
 
-def scan_mods(mods_dir, manifest):
+def scan_mods(mods_dir, manifest, active=None):
     """-> {addon id: {"mod": folder name, "version": str}} for every installed LEWD mod we can identify.
-    Several folders with the same id: the highest version wins."""
+    active = set of enabled mod names: disabled mods (old copies) are ignored. Several folders with the same id: the
+    highest version wins."""
     found = {}
     detect = [(a["id"], a["detect"]) for a in manifest.get("addons", []) if a.get("detect")]
     for d in sorted(Path(mods_dir).iterdir()) if Path(mods_dir).is_dir() else []:
-        if not d.is_dir() or d.name.endswith("_separator"):
+        if not d.is_dir() or d.name.endswith("_separator") or (active is not None and d.name not in active):
             continue
         hits = []
         idf = d / ID_FILE
@@ -378,6 +379,10 @@ if mobase is not None:
         def _mods_dir(self):
             return Path(self._org.modsPath())
 
+        def _active(self):
+            ml = self._org.modList()
+            return {m for m in ml.allMods() if ml.state(m) & mobase.ModState.ACTIVE}
+
         def _load_manifest(self):
             url = self._org.pluginSetting(self.name(), "manifest_url") or DEFAULT_MANIFEST
             override = Path(__file__).with_suffix(".url")  # dev/test: lewd_addon_manager.url next to the plugin
@@ -398,7 +403,7 @@ if mobase is not None:
                 QMessageBox.warning(self._parent, "LEWD Addons",
                                     "Your mods asked for addons, but the addon list could not be loaded:\n%s" % e)
                 return
-            installed = scan_mods(self._mods_dir(), manifest)
+            installed = scan_mods(self._mods_dir(), manifest, self._active())
             ask = [aid for aid in wants if aid not in installed]
             dismissed = set(json.loads(self._org.persistent(self.name(), "dismissed", "[]") or "[]"))
             ask = [a for a in ask if a not in dismissed]
@@ -418,7 +423,7 @@ if mobase is not None:
                 QMessageBox.warning(self._parent, "LEWD Addons", "Could not load the addon list:\n%s" % e)
                 return
             self._offer_plugin_update(manifest)
-            installed = scan_mods(self._mods_dir(), manifest)
+            installed = scan_mods(self._mods_dir(), manifest, self._active())
             dlg = AddonDialog(self._parent, manifest, installed, preselect=wanted_markers(self._mods_dir()).keys())
             if dlg.exec():
                 self._install(dlg.picked(), manifest, installed)
@@ -516,7 +521,7 @@ if mobase is not None:
             if any(n not in names for _, n in done) and attempt < 10:
                 QTimer.singleShot(1000, lambda: self._place(done, attempt + 1))
                 return
-            installed = scan_mods(self._mods_dir(), self._manifest or {})
+            installed = scan_mods(self._mods_dir(), self._manifest or {}, self._active())
             for a, n in done:
                 if n not in names:
                     continue
