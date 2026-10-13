@@ -38,7 +38,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 DEFAULT_MANIFEST = "https://github.com/l4u6h1n6lun4t1c/lewd-addons/releases/latest/download/index.json"
 ID_FILE = "lewd_addon.json"
 WANT_DIR = ("lewd_addons", "want")
@@ -529,6 +529,9 @@ if mobase is not None:
                 if after and after in names:
                     ml.setPriority(n, ml.priority(after) + 1)
                 ml.setActive(n, True)
+            # rebuild MO2's file tree: without it the new mods have no "origin" yet and the next drag/toggle of
+            # them raises "invalid origin name" (seen 2026-10-13)
+            self._org.refresh(True)
             QMessageBox.information(self._parent, "LEWD Addons",
                                     "Installed and enabled:\n" + "\n".join(n for _, n in done))
 
