@@ -29,6 +29,8 @@ An entry without "url" is listed for detection/requirements only (e.g. a mod pub
 import hashlib
 import json
 import os
+import re
+import subprocess
 import shutil
 import threading
 import time
@@ -36,7 +38,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 DEFAULT_MANIFEST = "https://github.com/l4u6h1n6lun4t1c/lewd-addons/releases/latest/download/index.json"
 ID_FILE = "lewd_addon.json"
 WANT_DIR = ("lewd_addons", "want")
@@ -55,9 +57,48 @@ def vtuple(v):
     return tuple(out)
 
 
+_RELEASE_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/releases/(?:download/([^/]+)|latest/download)/([^/?#]+)$")
+_token = []
+
+
+def github_token():
+    """Token for PRIVATE release downloads (author's own PC): GH_TOKEN / GITHUB_TOKEN, else `gh auth token`.
+    Players of a public repo need none; without a token everything goes the anonymous way."""
+    if not _token:
+        tok = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+        if not tok:
+            for gh in ("gh", r"C:\Program Files\GitHub CLI\gh.exe"):
+                try:
+                    tok = subprocess.run([gh, "auth", "token"], capture_output=True, text=True, timeout=10,
+                                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.strip()
+                except Exception:
+                    tok = ""
+                if tok:
+                    break
+        _token.append(tok)
+    return _token[0]
+
+
+def open_url(url, timeout=60):
+    """urlopen; a github release asset url goes through the API with the token when one exists (private repo)."""
+    m = _RELEASE_URL.match(url)
+    tok = github_token() if m else ""
+    if not tok:
+        return urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=timeout)
+    repo, tag, name = m.groups()
+    api = "https://api.github.com/repos/%s/releases/%s" % (repo, ("tags/" + tag) if tag else "latest")
+    hdr = {"User-Agent": UA, "Authorization": "Bearer " + tok, "Accept": "application/vnd.github+json"}
+    with urllib.request.urlopen(urllib.request.Request(api, headers=hdr), timeout=timeout) as r:
+        rel = json.loads(r.read().decode("utf-8"))
+    asset = next((x for x in rel.get("assets", []) if x["name"] == name), None)
+    if asset is None:
+        raise FileNotFoundError("%s not in release %s" % (name, rel.get("tag_name")))
+    hdr["Accept"] = "application/octet-stream"
+    return urllib.request.urlopen(urllib.request.Request(asset["url"], headers=hdr), timeout=timeout)
+
+
 def fetch_manifest(url, timeout=20):
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with open_url(url, timeout) as r:
         data = json.loads(r.read().decode("utf-8"))
     if data.get("schema") != 1:
         raise ValueError("unknown manifest schema %r" % data.get("schema"))
@@ -164,9 +205,8 @@ def download(url, dest, sha256=None, progress=None, cancel=None):
     if dest.is_file() and sha256 and file_sha256(dest) == sha256.lower():
         return dest
     part = dest.with_name(dest.name + ".part")
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
     h = hashlib.sha256()
-    with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
+    with open_url(url) as r, open(part, "wb") as f:
         total = int(r.headers.get("Content-Length") or 0)
         done = 0
         while True:
