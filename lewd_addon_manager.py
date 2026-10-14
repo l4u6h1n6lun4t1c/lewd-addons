@@ -38,7 +38,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-__version__ = "0.1.3"
+__version__ = "0.2.0"
 DEFAULT_MANIFEST = "https://github.com/l4u6h1n6lun4t1c/lewd-addons/releases/latest/download/index.json"
 ID_FILE = "lewd_addon.json"
 WANT_DIR = ("lewd_addons", "want")
@@ -285,12 +285,14 @@ except ImportError:  # running the core tests outside MO2
 if mobase is not None:
 
     class AddonDialog(QDialog):
-        def __init__(self, parent, manifest, installed, preselect=()):
+        def __init__(self, parent, manifest, installed, preselect=(), intro=None):
             super().__init__(parent)
             self.setWindowTitle("LEWD Addons")
             self.resize(820, 520)
             lay = QVBoxLayout(self)
-            lay.addWidget(QLabel("Tick the addons to install or update. Requirements are added automatically."))
+            lab = QLabel(intro or "Tick the addons to install or update. Requirements are added automatically.")
+            lab.setWordWrap(True)
+            lay.addWidget(lab)
             self.tree = QTreeWidget()
             self.tree.setHeaderLabels(["Addon", "Size", "Installed", "Available", "Notes"])
             self.tree.setColumnWidth(0, 330)
@@ -340,7 +342,7 @@ if mobase is not None:
         # --- plugin boilerplate
         def init(self, organizer):
             self._org = organizer
-            organizer.onUserInterfaceInitialized(lambda win: QTimer.singleShot(3000, self._check_markers))
+            organizer.onUserInterfaceInitialized(lambda win: QTimer.singleShot(3000, lambda: self._check_markers(True)))
             ml = organizer.modList()
             if hasattr(ml, "onModInstalled"):
                 ml.onModInstalled(lambda mod: QTimer.singleShot(1500, self._check_markers))
@@ -361,7 +363,8 @@ if mobase is not None:
 
         def settings(self):
             return [mobase.PluginSetting("manifest_url", "Addon list URL (https:// or file:///)", DEFAULT_MANIFEST),
-                    mobase.PluginSetting("ask_on_start", "Offer addons picked in a FOMOD", True)]
+                    mobase.PluginSetting("ask_on_start", "Offer addons picked in a FOMOD", True),
+                    mobase.PluginSetting("check_updates", "Tell me about new addon versions when MO2 starts", True)]
 
         def displayName(self):
             return "LEWD Addons"
@@ -391,29 +394,66 @@ if mobase is not None:
             self._manifest = fetch_manifest(url)
             return self._manifest
 
-        def _check_markers(self):
-            if not self._org.pluginSetting(self.name(), "ask_on_start"):
+        def _check_markers(self, startup=False):
+            """Load the addon list in the background (MO2 stays responsive), then offer
+            (a) addons a FOMOD asked for that are not installed, (b) newer versions of installed addons
+            (e.g. new scopes in a growing collection). Declined offers are remembered per id@version."""
+            wants = wanted_markers(self._mods_dir()) if self._org.pluginSetting(self.name(), "ask_on_start") else {}
+            updates_on = bool(self._org.pluginSetting(self.name(), "check_updates"))
+            if not wants and not (startup and updates_on):
                 return
-            wants = wanted_markers(self._mods_dir())
-            if not wants:
-                return
-            try:
-                manifest = self._load_manifest()
-            except Exception as e:
-                QMessageBox.warning(self._parent, "LEWD Addons",
-                                    "Your mods asked for addons, but the addon list could not be loaded:\n%s" % e)
-                return
+            box = {}
+
+            def work():
+                try:
+                    box["m"] = self._load_manifest()
+                except Exception as e:
+                    box["e"] = e
+
+            t = threading.Thread(target=work, daemon=True)
+            t.start()
+            timer = QTimer(self._parent)
+
+            def poll():
+                if t.is_alive():
+                    return
+                timer.stop()
+                timer.deleteLater()
+                if "e" in box:
+                    if wants:  # stay quiet about a failed update check, but not about picked addons
+                        QMessageBox.warning(self._parent, "LEWD Addons", "Your mods asked for addons, but the "
+                                            "addon list could not be loaded:\n%s" % box["e"])
+                    return
+                self._offer(box["m"], wants, updates_on)
+
+            timer.timeout.connect(poll)
+            timer.start(250)
+
+        def _offer(self, manifest, wants, updates_on):
             installed = scan_mods(self._mods_dir(), manifest, self._active())
-            ask = [aid for aid in wants if aid not in installed]
+            by_id = {a["id"]: a for a in manifest.get("addons", []) if a.get("url")}
             dismissed = set(json.loads(self._org.persistent(self.name(), "dismissed", "[]") or "[]"))
-            ask = [a for a in ask if a not in dismissed]
-            if not ask:
+            offers = []
+            for aid in wants:
+                if aid not in installed and aid in by_id:
+                    offers.append("%s@%s" % (aid, by_id[aid]["version"]))
+            if updates_on:
+                for aid, have in installed.items():
+                    a = by_id.get(aid)
+                    if a and vtuple(a["version"]) > vtuple(have["version"]):
+                        offers.append("%s@%s" % (aid, a["version"]))
+            offers = [o for o in offers if o not in dismissed and o.split("@")[0] not in dismissed]
+            if not offers:
                 return
-            dlg = AddonDialog(self._parent, manifest, installed, preselect=ask)
+            ids = [o.split("@")[0] for o in offers]
+            dlg = AddonDialog(self._parent, manifest, installed, preselect=ids,
+                              intro="New downloads for your LEWD mods: the ones you picked in an installer and "
+                                    "newer versions of what you have (e.g. new scopes). Close = don't ask again "
+                                    "for these versions; Tools -> LEWD Addons always shows everything.")
             if dlg.exec():
                 self._install(dlg.picked(), manifest, installed)
             else:
-                self._org.setPersistent(self.name(), "dismissed", json.dumps(sorted(dismissed | set(ask))))
+                self._org.setPersistent(self.name(), "dismissed", json.dumps(sorted(dismissed | set(offers))))
 
         # --- main entry (Tools menu)
         def display(self):
