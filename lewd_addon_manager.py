@@ -38,7 +38,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 DEFAULT_MANIFEST = "https://github.com/l4u6h1n6lun4t1c/lewd-addons/releases/latest/download/index.json"
 ID_FILE = "lewd_addon.json"
 WANT_DIR = ("lewd_addons", "want")
@@ -116,14 +116,17 @@ def read_meta_version(mod_dir):
 
 
 def scan_mods(mods_dir, manifest, active=None):
-    """-> {addon id: {"mod": folder name, "version": str}} for every installed LEWD mod we can identify.
-    active = set of enabled mod names: disabled mods (old copies) are ignored. Several folders with the same id: the
-    highest version wins."""
-    found = {}
+    """-> {addon id: {"mod": folder name, "version": str, "active": bool}} for every installed LEWD mod we can identify.
+    active = set of enabled mod names. Enabled mods always win. A DISABLED mod only counts when no enabled mod has
+    that id, and then only when it carries lewd_addon.json (a fresh install MO2 left unticked) - a disabled mod that
+    merely matches a detect file is an old copy and is ignored (2026-10-13: old 'LEWD VHS-2' taken as the base).
+    Several folders with the same id: the highest version wins."""
+    found, sleeping = {}, {}
     detect = [(a["id"], a["detect"]) for a in manifest.get("addons", []) if a.get("detect")]
     for d in sorted(Path(mods_dir).iterdir()) if Path(mods_dir).is_dir() else []:
-        if not d.is_dir() or d.name.endswith("_separator") or (active is not None and d.name not in active):
+        if not d.is_dir() or d.name.endswith("_separator"):
             continue
+        on = active is None or d.name in active
         hits = []
         idf = d / ID_FILE
         if idf.is_file():
@@ -132,14 +135,18 @@ def scan_mods(mods_dir, manifest, active=None):
                 hits.append((info["id"], str(info.get("version", "0"))))
             except Exception:
                 pass
-        for aid, rule in detect:
-            f = rule.get("file")
-            if f and (d / f).is_file() and aid not in [h[0] for h in hits]:
-                hits.append((aid, read_meta_version(d) or "0"))
+        if on:
+            for aid, rule in detect:
+                f = rule.get("file")
+                if f and (d / f).is_file() and aid not in [h[0] for h in hits]:
+                    hits.append((aid, read_meta_version(d) or "0"))
+        target = found if on else sleeping
         for aid, ver in hits:
-            cur = found.get(aid)
+            cur = target.get(aid)
             if cur is None or vtuple(ver) > vtuple(cur["version"]):
-                found[aid] = {"mod": d.name, "version": ver}
+                target[aid] = {"mod": d.name, "version": ver, "active": on}
+    for aid, v in sleeping.items():
+        found.setdefault(aid, v)
     return found
 
 
@@ -587,18 +594,25 @@ if mobase is not None:
                 QTimer.singleShot(1000, lambda: self._place(done, attempt + 1))
                 return
             installed = scan_mods(self._mods_dir(), self._manifest or {}, self._active())
+            woke = []
             for a, n in done:
                 if n not in names:
                     continue
-                after = installed.get(a.get("after", ""), {}).get("mod")
+                base = installed.get(a.get("after", ""), {})
+                after = base.get("mod")
                 if after and after in names:
+                    if not base.get("active") and after not in woke:
+                        ml.setActive(after, True)  # MO2 leaves a fresh FOMOD install unticked
+                        woke.append(after)
                     ml.setPriority(n, ml.priority(after) + 1)
                 ml.setActive(n, True)
             # rebuild MO2's file tree: without it the new mods have no "origin" yet and the next drag/toggle of
             # them raises "invalid origin name" (seen 2026-10-13)
             self._org.refresh(True)
             QMessageBox.information(self._parent, "LEWD Addons",
-                                    "Installed and enabled:\n" + "\n".join(n for _, n in done))
+                                    "Installed and enabled:\n" + "\n".join(n for _, n in done) +
+                                    ("\n\nAlso ticked (it was installed but not enabled):\n" + "\n".join(woke)
+                                     if woke else ""))
 
 
 def createPlugin():
