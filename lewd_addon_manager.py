@@ -38,7 +38,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 DEFAULT_MANIFEST = "https://github.com/l4u6h1n6lun4t1c/lewd-addons/releases/latest/download/index.json"
 ID_FILE = "lewd_addon.json"
 WANT_DIR = ("lewd_addons", "want")
@@ -158,6 +158,11 @@ def wanted_markers(mods_dir):
     return out
 
 
+def _need(why, name, minv):
+    v = "" if vtuple(minv) == (0,) else " %s or newer" % minv
+    return ("%s needs %s%s." % (why, name, v)) if why else ("%s%s:" % (name, v))
+
+
 def resolve(picked, manifest, installed):
     """Order the picked addon ids + every missing/outdated requirement, requirements first.
     -> (install list of addon dicts, problems list of str)"""
@@ -177,15 +182,15 @@ def resolve(picked, manifest, installed):
         ok[aid] = False
         a = by_id.get(aid)
         if a is None:
-            problems.append("%s needs '%s' %s, which is not in the addon list." % (why, aid, minv))
+            problems.append(_need(why, "'%s'" % aid, minv) + " It is not in the addon list.")
             return False
         name = a.get("name", aid)
         if vtuple(a.get("version")) < vtuple(minv):
-            problems.append("%s needs %s %s, newest available is %s." % (why, name, minv, a.get("version")))
+            problems.append(_need(why, name, minv) + " Newest available: %s." % a.get("version"))
             return False
         if not a.get("url"):
             where = (" Get it here: " + a["page"]) if a.get("page") else ""
-            problems.append("%s needs %s %s, install it by hand.%s" % (why, name, minv, where))
+            problems.append(_need(why, name, minv) + " It is not downloadable yet, install it by hand." + where)
             return False
         if not all([need(r["id"], r.get("min", "0"), name) for r in a.get("requires", [])]):
             problems.append("%s skipped." % name)
@@ -195,7 +200,10 @@ def resolve(picked, manifest, installed):
         return True
 
     for aid in picked:
-        visit(aid, "You")
+        have, a = installed.get(aid), by_id.get(aid)
+        if have and (a is None or vtuple(have["version"]) >= vtuple(a.get("version"))):
+            continue  # already there and up to date
+        visit(aid, None)
     return order, problems
 
 
