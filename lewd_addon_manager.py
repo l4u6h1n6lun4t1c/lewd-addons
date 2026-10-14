@@ -38,7 +38,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 DEFAULT_MANIFEST = "https://github.com/l4u6h1n6lun4t1c/lewd-addons/releases/latest/download/index.json"
 ID_FILE = "lewd_addon.json"
 WANT_DIR = ("lewd_addons", "want")
@@ -249,18 +249,34 @@ def zip_has_fomod(path):
         return any(n.lower().replace("\\", "/").endswith("fomod/moduleconfig.xml") for n in z.namelist())
 
 
-def extract_mod(zip_path, mods_dir, addon):
-    """Plain addon zip (gamedata/... + lewd_addon.json) -> <mods>/<mod_name>, replacing an older copy."""
+HD_DIR = "hd icons/"
+
+
+def extract_mod(zip_path, mods_dir, addon, hd=True):
+    """Plain addon zip (gamedata/... + lewd_addon.json) -> <mods>/<mod_name>, replacing an older copy.
+    An optional "HD icons/gamedata/..." folder in the zip (LEWD ASS modules) is merged over gamedata when hd is on
+    and skipped otherwise."""
     target = Path(mods_dir) / addon["mod_name"]
     tmp = target.with_name(target.name + ".lewdtmp")
     if tmp.exists():
         shutil.rmtree(tmp)
     with zipfile.ZipFile(zip_path) as z:
-        for n in z.namelist():
-            p = Path(n)
+        infos = [i for i in z.infolist() if not i.is_dir()]
+        for i in infos:
+            p = Path(i.filename)
             if p.is_absolute() or ".." in p.parts:
-                raise ValueError("unsafe path in zip: %s" % n)
-        z.extractall(tmp)
+                raise ValueError("unsafe path in zip: %s" % i.filename)
+        hd_files = [i for i in infos if i.filename.replace("\\", "/").lower().startswith(HD_DIR)]
+        for i in infos:
+            if i not in hd_files:
+                z.extract(i, tmp)
+        if hd:
+            for i in hd_files:
+                rel = i.filename.replace("\\", "/")[len(HD_DIR):]
+                dest = tmp / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(i) as src, open(dest, "wb") as out:
+                    shutil.copyfileobj(src, out)
     (tmp / ID_FILE).write_text(json.dumps({"id": addon["id"], "version": addon["version"]}, indent=1), "utf-8")
     (tmp / "meta.ini").write_text(
         "[General]\ngameName=stalkeranomaly\nmodid=0\nversion=%s\ninstallationFile=%s\nurl=%s\n"
@@ -372,7 +388,8 @@ if mobase is not None:
         def settings(self):
             return [mobase.PluginSetting("manifest_url", "Addon list URL (https:// or file:///)", DEFAULT_MANIFEST),
                     mobase.PluginSetting("ask_on_start", "Offer addons picked in a FOMOD", True),
-                    mobase.PluginSetting("check_updates", "Tell me about new addon versions when MO2 starts", True)]
+                    mobase.PluginSetting("check_updates", "Tell me about new addon versions when MO2 starts", True),
+                    mobase.PluginSetting("hd_icons", "Install the HD icons that come with addons", True)]
 
         def displayName(self):
             return "LEWD Addons"
@@ -553,7 +570,7 @@ if mobase is not None:
                         if mod is not None:
                             done.append((a, mod.name()))
                     else:
-                        extract_mod(f, self._mods_dir(), a)
+                        extract_mod(f, self._mods_dir(), a, bool(self._org.pluginSetting(self.name(), "hd_icons")))
                         done.append((a, a["mod_name"]))
                 except Exception as e:
                     QMessageBox.warning(self._parent, "LEWD Addons", "Installing %s failed:\n%s" % (a["mod_name"], e))
