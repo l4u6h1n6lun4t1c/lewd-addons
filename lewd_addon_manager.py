@@ -38,7 +38,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-__version__ = "0.2.3"
+__version__ = "0.3.0"
 DEFAULT_MANIFEST = "https://github.com/l4u6h1n6lun4t1c/lewd-addons/releases/latest/download/index.json"
 ID_FILE = "lewd_addon.json"
 WANT_DIR = ("lewd_addons", "want")
@@ -304,6 +304,32 @@ def human(n):
 
 # ---------------------------------------------------------------- MO2 side
 
+HELP_HTML = """
+<h3>LEWD Addon Manager</h3>
+<p>LEWD mods stay small: the extras that not everybody wants (camos, baked scopes, HD icons, LEWD ASS modules such as
+scopes, bipods and lights) are separate downloads. This plugin fetches them for you from GitHub and installs each one
+as its own mod in MO2, right below the mod it belongs to, already ticked.</p>
+<p><b>When does it show up?</b></p>
+<ul>
+<li>After you install a LEWD mod and ticked a DOWNLOAD option in its installer: it offers exactly those.</li>
+<li>When MO2 starts and something you already have got a newer version (for example new scopes in the all-in
+collection). Close the window and it stays quiet about that version.</li>
+<li>Any time from <b>Tools &gt; LEWD Addons</b>: the full list, with what you have and what is new.</li>
+</ul>
+<p><b>Good to know</b></p>
+<ul>
+<li>Requirements are added on their own (for example a camo pack needs its gun mod).</li>
+<li>Every download is checked (SHA-256) before it is installed. Files land in MO2's downloads folder under
+"LEWD addons", so you can reinstall without downloading again.</li>
+<li>Every addon zip is a normal mod archive: you can also install it by hand from the GitHub release page.</li>
+<li>To remove an addon, delete its mod in MO2 like any other.</li>
+<li>Settings (MO2 &gt; Settings &gt; Plugins &gt; LEWD Addon Manager): update notices, HD icons, offer installer picks.</li>
+</ul>
+<p>The plugin updates itself when a new version is out (you are asked first). It never touches your game exes or
+any mod that is not a LEWD addon.</p>
+"""
+
+
 try:
     import mobase
     from PyQt6.QtCore import Qt, QTimer
@@ -326,6 +352,7 @@ if mobase is not None:
             lay.addWidget(lab)
             self.tree = QTreeWidget()
             self.tree.setHeaderLabels(["Addon", "Size", "Installed", "Available", "Notes"])
+            self.tree.setToolTip("Hover an addon for its description. Tick it to install or update.")
             self.tree.setColumnWidth(0, 330)
             packs = {}
             for a in manifest.get("addons", []):
@@ -346,7 +373,12 @@ if mobase is not None:
                 it.setCheckState(0, Qt.CheckState.Checked if tick else Qt.CheckState.Unchecked)
             lay.addWidget(self.tree)
             bb = QDialogButtonBox()
-            bb.addButton("Install / update ticked", QDialogButtonBox.ButtonRole.AcceptRole)
+            help_btn = bb.addButton("What is this?", QDialogButtonBox.ButtonRole.HelpRole)
+            help_btn.setToolTip("What the LEWD Addon Manager does and when it shows up")
+            help_btn.clicked.connect(lambda: QMessageBox.information(self, "LEWD Addon Manager", HELP_HTML))
+            ok_btn = bb.addButton("Install / update ticked", QDialogButtonBox.ButtonRole.AcceptRole)
+            ok_btn.setToolTip("Download the ticked addons (and anything they need), check them and install each as "
+                              "its own mod, below the mod it belongs to")
             bb.addButton(QDialogButtonBox.StandardButton.Close)
             bb.accepted.connect(self.accept)
             bb.rejected.connect(self.reject)
@@ -386,7 +418,9 @@ if mobase is not None:
             return "LEWD"
 
         def description(self):
-            return "Downloads and installs optional parts of LEWD mods (camos, scopes, textures, attachments)."
+            return ("Downloads and installs the optional parts of LEWD mods (camos, baked scopes, HD icons, LEWD ASS "
+                    "modules) from GitHub, each as its own mod. Offers what you ticked in a LEWD installer and tells you "
+                    "about new versions. Open it from Tools > LEWD Addons.")
 
         def version(self):
             p = [int(x) for x in __version__.split(".")]
@@ -402,7 +436,8 @@ if mobase is not None:
             return "LEWD Addons"
 
         def tooltip(self):
-            return "Download optional parts of LEWD mods"
+            return ("Download optional parts of LEWD mods (camos, scopes, HD icons, LEWD ASS modules) "
+                    "and see what is new")
 
         def icon(self):
             return QIcon()
