@@ -47,6 +47,7 @@ __version__ = "0.4.0"
 DEFAULT_MANIFEST = "https://github.com/l4u6h1n6lun4t1c/lewd-addons/releases/latest/download/index.json"
 EXES_MANIFEST = "https://github.com/l4u6h1n6lun4t1c/lewd-modded-exe/releases/latest/download/lewd-exes.json"
 EXES_BIN = "bin_lewd"
+STAGING_REPO = "l4u6h1n6lun4t1c/lewd-staging"  # private: test builds, visible to testers only
 EXES_MOD = "Modded Exes - LEWD"
 ID_FILE = "lewd_addon.json"
 WANT_DIR = ("lewd_addons", "want")
@@ -105,24 +106,41 @@ def open_url(url, timeout=60):
     return urllib.request.urlopen(urllib.request.Request(asset["url"], headers=hdr), timeout=timeout)
 
 
-def staging_url(url, timeout=20):
-    """Test builds: a .../releases/latest/download/<file> url -> the same file in the newest release that has it,
-    pre-releases included (pre-releases are the staging channel). Any other url is returned unchanged."""
-    m = _RELEASE_URL.match(url)
-    if not m or m.group(2):
-        return url
-    repo, _tag, name = m.groups()
-    api = "https://api.github.com/repos/%s/releases?per_page=20" % repo
-    hdr = {"User-Agent": UA, "Accept": "application/vnd.github+json"}
+def staging_asset_url(name, prefix, timeout=20):
+    """Test builds live in the PRIVATE repo STAGING_REPO, so only accounts with access (testers) can see them.
+    -> download url of <name> in the newest staging release whose tag starts with <prefix>, or None
+    (no GitHub sign-in, no access, nothing there)."""
     tok = github_token()
-    if tok:
-        hdr["Authorization"] = "Bearer " + tok
-    with urllib.request.urlopen(urllib.request.Request(api, headers=hdr), timeout=timeout) as r:
-        rels = json.loads(r.read().decode("utf-8"))
+    if not tok:
+        return None
+    api = "https://api.github.com/repos/%s/releases?per_page=30" % STAGING_REPO
+    hdr = {"User-Agent": UA, "Accept": "application/vnd.github+json", "Authorization": "Bearer " + tok}
+    try:
+        with urllib.request.urlopen(urllib.request.Request(api, headers=hdr), timeout=timeout) as r:
+            rels = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
     for rel in rels:  # newest first
-        if not rel.get("draft") and any(a["name"] == name for a in rel.get("assets", [])):
-            return "https://github.com/%s/releases/download/%s/%s" % (repo, rel["tag_name"], name)
-    return url
+        if (not rel.get("draft") and rel.get("tag_name", "").startswith(prefix)
+                and any(a["name"] == name for a in rel.get("assets", []))):
+            return "https://github.com/%s/releases/download/%s/%s" % (STAGING_REPO, rel["tag_name"], name)
+    return None
+
+
+def merge_manifests(public, staging):
+    """Addon list for testers: per addon id the higher version wins; staging entries are marked "test"."""
+    if not staging:
+        return public
+    if not public:
+        public = {"schema": 1, "addons": []}
+    out = dict(public)
+    by_id = {a["id"]: a for a in public.get("addons", [])}
+    for a in staging.get("addons", []):
+        cur = by_id.get(a["id"])
+        if cur is None or vtuple(a.get("version")) > vtuple(cur.get("version")):
+            by_id[a["id"]] = dict(a, test=True)
+    out["addons"] = list(by_id.values())
+    return out
 
 
 def fetch_manifest(url, timeout=20):
@@ -342,10 +360,11 @@ def fetch_exes_manifest(url, timeout=20):
 
 
 def exes_zip_url(manifest_url, manifest):
-    """The release zip next to the manifest, pinned to the manifest's own release tag."""
+    """The release zip next to the manifest, pinned to the manifest's release tag (public tag = version)."""
     m = _RELEASE_URL.match(manifest_url)
     if m:
-        return "https://github.com/%s/releases/download/%s/%s" % (m.group(1), manifest["version"], manifest["zip"])
+        return "https://github.com/%s/releases/download/%s/%s" % (m.group(1), m.group(2) or manifest["version"],
+                                                                 manifest["zip"])
     return manifest_url.rsplit("/", 1)[0] + "/" + manifest["zip"]
 
 
@@ -518,6 +537,8 @@ if mobase is not None:
                 have = installed.get(a["id"])
                 hv = have["version"] if have else ""
                 state = "" if not have else ("up to date" if vtuple(hv) >= vtuple(a["version"]) else "update")
+                if a.get("test"):
+                    state = (state + ", " if state else "") + "TEST BUILD"
                 it = QTreeWidgetItem(pack, [a.get("name", a["id"]), human(a.get("size", 0)), hv, a["version"], state])
                 it.setToolTip(0, a.get("description", ""))
                 it.setToolTip(4, a.get("description", ""))
@@ -590,8 +611,8 @@ if mobase is not None:
                     mobase.PluginSetting("ask_on_start", "Offer addons picked in a FOMOD", True),
                     mobase.PluginSetting("check_updates", "Tell me about new addon versions when MO2 starts", True),
                     mobase.PluginSetting("hd_icons", "Install the HD icons that come with addons", True),
-                    mobase.PluginSetting("test_builds", "Test builds: also offer pre-releases (staging) of addons, "
-                                         "mods and the LEWD Modded Exes. For testers only.", False),
+                    mobase.PluginSetting("test_builds", "Testers: offer test builds when this PC's GitHub sign-in has "
+                                         "access to the private LEWD staging repo (does nothing otherwise)", True),
                     mobase.PluginSetting("exes_updates", "Offer new LEWD Modded Exes when MO2 starts", True),
                     mobase.PluginSetting("use_lewd_exes", "Start the LEWD Modded Exes (bin_lewd) in place of the "
                                          "stock exes in bin", True),
@@ -623,9 +644,21 @@ if mobase is not None:
             override = Path(__file__).with_suffix(".url")  # dev/test: lewd_addon_manager.url next to the plugin
             if url == DEFAULT_MANIFEST and override.is_file():
                 url = override.read_text("utf-8").strip() or url
+            public = staging = err = None
+            try:
+                public = fetch_manifest(url)
+            except Exception as e:
+                err = e
             if self._org.pluginSetting(self.name(), "test_builds"):
-                url = staging_url(url)
-            self._manifest = fetch_manifest(url)
+                surl = staging_asset_url("index.json", "addons-")
+                if surl:
+                    try:
+                        staging = fetch_manifest(surl)
+                    except Exception:
+                        staging = None
+            if public is None and staging is None:
+                raise err
+            self._manifest = merge_manifests(public, staging)
             return self._manifest
 
         def _check_markers(self, startup=False):
@@ -823,10 +856,30 @@ if mobase is not None:
             return Path(self._org.managedGame().gameDirectory().absolutePath())
 
         def _exes_url(self):
-            url = self._org.pluginSetting(self.name(), "exes_manifest_url") or EXES_MANIFEST
+            return self._org.pluginSetting(self.name(), "exes_manifest_url") or EXES_MANIFEST
+
+        def _fetch_best_exes(self):
+            """Public lewd-exes.json, or the staging one when this PC has tester access and it is newer.
+            The url it came from is kept in manifest["_url"] (the zip is next to it)."""
+            best, err = None, None
+            try:
+                best = fetch_exes_manifest(self._exes_url())
+                best["_url"] = self._exes_url()
+            except Exception as e:
+                err = e
             if self._org.pluginSetting(self.name(), "test_builds"):
-                url = staging_url(url)
-            return url
+                surl = staging_asset_url("lewd-exes.json", "exes-")
+                if surl:
+                    try:
+                        st = fetch_exes_manifest(surl)
+                        if best is None or vtuple(st["version"]) > vtuple(best["version"]):
+                            st["_url"], st["test"] = surl, True
+                            best = st
+                    except Exception:
+                        pass
+            if best is None:
+                raise err
+            return best
 
         def _on_about_to_run(self, path, *rest):
             """MO2 is about to start bin/X.exe: start bin_lewd/X.exe instead when it exists and the setting is on."""
@@ -850,7 +903,7 @@ if mobase is not None:
 
             def work():
                 try:
-                    box["m"] = fetch_exes_manifest(self._exes_url())
+                    box["m"] = self._fetch_best_exes()
                 except Exception as e:
                     box["e"] = e
 
@@ -886,6 +939,8 @@ if mobase is not None:
             dismissed = set(json.loads(self._org.persistent(self.name(), "dismissed", "[]") or "[]"))
             if not manual and key in dismissed:
                 return
+            if manifest.get("test"):
+                new += " (TEST BUILD)"
             if have:
                 text = "LEWD Modded Exes %s is out (you have %s). Update now?" % (new, have)
             else:
@@ -899,7 +954,7 @@ if mobase is not None:
             self._install_exes(manifest)
 
         def _install_exes(self, manifest):
-            url = exes_zip_url(self._exes_url(), manifest)
+            url = exes_zip_url(manifest.get("_url") or self._exes_url(), manifest)
             dl_dir = Path(self._org.downloadsPath()) / "LEWD addons"
             game, mods = self._game_dir(), self._mods_dir()
             state = {"done": 0, "total": 0, "error": None, "version": None, "finished": False}

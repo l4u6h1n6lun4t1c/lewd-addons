@@ -55,11 +55,16 @@ The Addon Manager also installs and updates the **LEWD Modded Exes**, the LEWD f
 
 ## Test builds (staging)
 
-New versions can be published as GitHub **pre-releases** first. Players never see them. With **Test builds** on
-(MO2 > Settings > Plugins > LEWD Addon Manager), the plugin also offers the newest pre-release of the addon list
-(`index.json`) and of the LEWD Modded Exes, so the author and testers can try them. When a build is good, edit the
-release on GitHub: untick "Set as a pre-release" and tick "Set as the latest release". Everyone gets it on their next
-MO2 start.
+Test versions go to the **private** repo [lewd-staging](https://github.com/l4u6h1n6lun4t1c/lewd-staging) first, so
+only testers see them:
+
+- Exes: release `exes-<version>`, made by the LEWD build workflow. Publish with **LEWD promote** in lewd-modded-exe.
+- Addons and mods: a release whose tag starts with `addons-`, holding a test `index.json` (its `url`s point at the
+  zips in that same staging release). Publish by uploading the tested files to a lewd-addons release.
+
+A tester's PC needs a GitHub sign-in (`gh auth login`, or a `GH_TOKEN`) for an account the author added to
+lewd-staging. The plugin then also offers test builds that are newer than the public ones, marked TEST BUILD.
+Players without access see nothing different. Testers can switch it off in the plugin settings.
 
 ## Remove it
 
