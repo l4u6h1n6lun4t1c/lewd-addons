@@ -53,6 +53,14 @@ The Addon Manager also installs and updates the **LEWD Modded Exes**, the LEWD f
 - A LEWD mod that needs the LEWD exes can ask for them like an addon: its installer drops the marker
   `lewd_addons/want/lewd.exes`.
 
+## Test builds (staging)
+
+New versions can be published as GitHub **pre-releases** first. Players never see them. With **Test builds** on
+(MO2 > Settings > Plugins > LEWD Addon Manager), the plugin also offers the newest pre-release of the addon list
+(`index.json`) and of the LEWD Modded Exes, so the author and testers can try them. When a build is good, edit the
+release on GitHub: untick "Set as a pre-release" and tick "Set as the latest release". Everyone gets it on their next
+MO2 start.
+
 ## Remove it
 
 Delete `plugins\lewd_addon_manager.py` in your Mod Organizer folder. Addons you installed stay as normal mods.

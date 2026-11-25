@@ -105,6 +105,26 @@ def open_url(url, timeout=60):
     return urllib.request.urlopen(urllib.request.Request(asset["url"], headers=hdr), timeout=timeout)
 
 
+def staging_url(url, timeout=20):
+    """Test builds: a .../releases/latest/download/<file> url -> the same file in the newest release that has it,
+    pre-releases included (pre-releases are the staging channel). Any other url is returned unchanged."""
+    m = _RELEASE_URL.match(url)
+    if not m or m.group(2):
+        return url
+    repo, _tag, name = m.groups()
+    api = "https://api.github.com/repos/%s/releases?per_page=20" % repo
+    hdr = {"User-Agent": UA, "Accept": "application/vnd.github+json"}
+    tok = github_token()
+    if tok:
+        hdr["Authorization"] = "Bearer " + tok
+    with urllib.request.urlopen(urllib.request.Request(api, headers=hdr), timeout=timeout) as r:
+        rels = json.loads(r.read().decode("utf-8"))
+    for rel in rels:  # newest first
+        if not rel.get("draft") and any(a["name"] == name for a in rel.get("assets", [])):
+            return "https://github.com/%s/releases/download/%s/%s" % (repo, rel["tag_name"], name)
+    return url
+
+
 def fetch_manifest(url, timeout=20):
     with open_url(url, timeout) as r:
         data = json.loads(r.read().decode("utf-8"))
@@ -570,6 +590,8 @@ if mobase is not None:
                     mobase.PluginSetting("ask_on_start", "Offer addons picked in a FOMOD", True),
                     mobase.PluginSetting("check_updates", "Tell me about new addon versions when MO2 starts", True),
                     mobase.PluginSetting("hd_icons", "Install the HD icons that come with addons", True),
+                    mobase.PluginSetting("test_builds", "Test builds: also offer pre-releases (staging) of addons, "
+                                         "mods and the LEWD Modded Exes. For testers only.", False),
                     mobase.PluginSetting("exes_updates", "Offer new LEWD Modded Exes when MO2 starts", True),
                     mobase.PluginSetting("use_lewd_exes", "Start the LEWD Modded Exes (bin_lewd) in place of the "
                                          "stock exes in bin", True),
@@ -601,6 +623,8 @@ if mobase is not None:
             override = Path(__file__).with_suffix(".url")  # dev/test: lewd_addon_manager.url next to the plugin
             if url == DEFAULT_MANIFEST and override.is_file():
                 url = override.read_text("utf-8").strip() or url
+            if self._org.pluginSetting(self.name(), "test_builds"):
+                url = staging_url(url)
             self._manifest = fetch_manifest(url)
             return self._manifest
 
@@ -799,7 +823,10 @@ if mobase is not None:
             return Path(self._org.managedGame().gameDirectory().absolutePath())
 
         def _exes_url(self):
-            return self._org.pluginSetting(self.name(), "exes_manifest_url") or EXES_MANIFEST
+            url = self._org.pluginSetting(self.name(), "exes_manifest_url") or EXES_MANIFEST
+            if self._org.pluginSetting(self.name(), "test_builds"):
+                url = staging_url(url)
+            return url
 
         def _on_about_to_run(self, path, *rest):
             """MO2 is about to start bin/X.exe: start bin_lewd/X.exe instead when it exists and the setting is on."""
