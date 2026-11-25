@@ -38,6 +38,34 @@ archive, so you can install it by hand like any mod, below the mod it belongs to
 
 Settings: MO2 > Settings > Plugins > LEWD Addon Manager (update notices, HD icons, offer installer picks).
 
+## LEWD Modded Exes
+
+The Addon Manager also installs and updates the **LEWD Modded Exes**, the LEWD fork of the Modded Exes
+([lewd-modded-exe](https://github.com/l4u6h1n6lun4t1c/lewd-modded-exe)). It works on plain Anomaly and on GAMMA.
+
+- Open **Tools > LEWD Addons > LEWD Modded Exes...** to install, update, switch back to the stock exes or roll back.
+  MO2 also asks once on start, and again whenever a new build is out.
+- The exes go into a separate `bin_lewd` folder next to `bin`. Your `bin` folder is never changed, so GAMMA updates
+  can't break it and the stock exes stay as a fallback.
+- Their gamedata is the mod **Modded Exes - LEWD**, at the lowest priority.
+- Start the game from MO2 as usual: when MO2 starts an exe from `bin`, the plugin starts the same exe from `bin_lewd`.
+- After the first install, clear the shader cache once in the Anomaly launcher.
+- A LEWD mod that needs the LEWD exes can ask for them like an addon: its installer drops the marker
+  `lewd_addons/want/lewd.exes`.
+
+## Test builds (staging)
+
+Test versions go to the **private** repo [lewd-staging](https://github.com/l4u6h1n6lun4t1c/lewd-staging) first, so
+only testers see them:
+
+- Exes: release `exes-<version>`, made by the LEWD build workflow. Publish with **LEWD promote** in lewd-modded-exe.
+- Addons and mods: a release whose tag starts with `addons-`, holding a test `index.json` (its `url`s point at the
+  zips in that same staging release). Publish by uploading the tested files to a lewd-addons release.
+
+A tester's PC needs a GitHub sign-in (`gh auth login`, or a `GH_TOKEN`) for an account the author added to
+lewd-staging. The plugin then also offers test builds that are newer than the public ones, marked TEST BUILD.
+Players without access see nothing different. Testers can switch it off in the plugin settings.
+
 ## Remove it
 
 Delete `plugins\lewd_addon_manager.py` in your Mod Organizer folder. Addons you installed stay as normal mods.

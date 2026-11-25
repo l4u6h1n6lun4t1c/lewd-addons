@@ -25,6 +25,11 @@ Manifest (index.json):
     }, ...]
 }
 An entry without "url" is listed for detection/requirements only (e.g. a mod published elsewhere: "page" link).
+
+LEWD Modded Exes (0.4.0): the engine fork from github.com/l4u6h1n6lun4t1c/lewd-modded-exe. Its releases carry
+lewd-exes.json {version, zip, files: {relative path: sha256}}. The plugin installs the exes into <game>/bin_lewd
+(never into bin/), the release's db/ gamedata into the mod "Modded Exes - LEWD" at the lowest priority, keeps the
+previous build as bin_lewd.prev for rollback, and starts bin_lewd/X.exe whenever MO2 is about to start bin/X.exe.
 """
 import hashlib
 import json
@@ -38,8 +43,12 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 DEFAULT_MANIFEST = "https://github.com/l4u6h1n6lun4t1c/lewd-addons/releases/latest/download/index.json"
+EXES_MANIFEST = "https://github.com/l4u6h1n6lun4t1c/lewd-modded-exe/releases/latest/download/lewd-exes.json"
+EXES_BIN = "bin_lewd"
+STAGING_REPO = "l4u6h1n6lun4t1c/lewd-staging"  # private: test builds, visible to testers only
+EXES_MOD = "Modded Exes - LEWD"
 ID_FILE = "lewd_addon.json"
 WANT_DIR = ("lewd_addons", "want")
 UA = "LEWD-Addon-Manager/" + __version__
@@ -95,6 +104,43 @@ def open_url(url, timeout=60):
         raise FileNotFoundError("%s not in release %s" % (name, rel.get("tag_name")))
     hdr["Accept"] = "application/octet-stream"
     return urllib.request.urlopen(urllib.request.Request(asset["url"], headers=hdr), timeout=timeout)
+
+
+def staging_asset_url(name, prefix, timeout=20):
+    """Test builds live in the PRIVATE repo STAGING_REPO, so only accounts with access (testers) can see them.
+    -> download url of <name> in the newest staging release whose tag starts with <prefix>, or None
+    (no GitHub sign-in, no access, nothing there)."""
+    tok = github_token()
+    if not tok:
+        return None
+    api = "https://api.github.com/repos/%s/releases?per_page=30" % STAGING_REPO
+    hdr = {"User-Agent": UA, "Accept": "application/vnd.github+json", "Authorization": "Bearer " + tok}
+    try:
+        with urllib.request.urlopen(urllib.request.Request(api, headers=hdr), timeout=timeout) as r:
+            rels = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+    for rel in rels:  # newest first
+        if (not rel.get("draft") and rel.get("tag_name", "").startswith(prefix)
+                and any(a["name"] == name for a in rel.get("assets", []))):
+            return "https://github.com/%s/releases/download/%s/%s" % (STAGING_REPO, rel["tag_name"], name)
+    return None
+
+
+def merge_manifests(public, staging):
+    """Addon list for testers: per addon id the higher version wins; staging entries are marked "test"."""
+    if not staging:
+        return public
+    if not public:
+        public = {"schema": 1, "addons": []}
+    out = dict(public)
+    by_id = {a["id"]: a for a in public.get("addons", [])}
+    for a in staging.get("addons", []):
+        cur = by_id.get(a["id"])
+        if cur is None or vtuple(a.get("version")) > vtuple(cur.get("version")):
+            by_id[a["id"]] = dict(a, test=True)
+    out["addons"] = list(by_id.values())
+    return out
 
 
 def fetch_manifest(url, timeout=20):
@@ -295,6 +341,128 @@ def extract_mod(zip_path, mods_dir, addon, hd=True):
     return target
 
 
+# ---------------------------------------------------------------- LEWD Modded Exes (core, no MO2 needed)
+
+def exes_installed(game_dir):
+    """Version in <game>/bin_lewd/lewd-exes.json, or "" when not installed."""
+    try:
+        return json.loads((Path(game_dir) / EXES_BIN / "lewd-exes.json").read_text("utf-8")).get("version", "")
+    except (OSError, ValueError):
+        return ""
+
+
+def fetch_exes_manifest(url, timeout=20):
+    with open_url(url, timeout) as r:
+        m = json.loads(r.read().decode("utf-8"))
+    if not m.get("version") or not m.get("zip") or not m.get("files"):
+        raise ValueError("lewd-exes.json is incomplete")
+    return m
+
+
+def exes_zip_url(manifest_url, manifest):
+    """The release zip next to the manifest, pinned to the manifest's release tag (public tag = version)."""
+    m = _RELEASE_URL.match(manifest_url)
+    if m:
+        return "https://github.com/%s/releases/download/%s/%s" % (m.group(1), m.group(2) or manifest["version"],
+                                                                 manifest["zip"])
+    return manifest_url.rsplit("/", 1)[0] + "/" + manifest["zip"]
+
+
+def exes_extract(zip_path, manifest, out_dir):
+    """Unpack the release zip and check every file listed in the manifest (SHA-256)."""
+    out_dir = Path(out_dir)
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    with zipfile.ZipFile(zip_path) as z:
+        for n in z.namelist():
+            p = Path(n)
+            if p.is_absolute() or ".." in p.parts:
+                raise ValueError("unsafe path in zip: %s" % n)
+        z.extractall(out_dir)
+    for rel, digest in manifest["files"].items():
+        f = out_dir.joinpath(*rel.split("/"))
+        if not f.is_file():
+            raise ValueError("missing from the zip: %s" % rel)
+        if file_sha256(f) != digest.lower():
+            raise ValueError("checksum mismatch: %s" % rel)
+    return out_dir
+
+
+def exes_install(game_dir, mods_dir, pkg, manifest):
+    """bin_lewd.new = runtime files of bin/ (DLLs, ini) + our exes + manifest; swap it in (old -> bin_lewd.prev);
+    db/ -> the "Modded Exes - LEWD" mod. bin/ itself is never written to."""
+    game = Path(game_dir)
+    cur, new, prev = game / EXES_BIN, game / (EXES_BIN + ".new"), game / (EXES_BIN + ".prev")
+    if new.exists():
+        shutil.rmtree(new)
+    new.mkdir(parents=True)
+    src_bin = game / "bin"
+    if src_bin.is_dir():
+        for f in src_bin.iterdir():
+            if f.is_file() and f.suffix.lower() not in (".exe", ".pdb", ".log"):
+                shutil.copy2(f, new / f.name)
+    for f in (Path(pkg) / "bin").iterdir():
+        shutil.copy2(f, new / f.name)
+    (new / "lewd-exes.json").write_text(json.dumps(manifest, indent=1), "utf-8")
+    if cur.exists():
+        old_prev = game / (EXES_BIN + ".prev.old")
+        if old_prev.exists():
+            shutil.rmtree(old_prev)
+        if prev.exists():
+            os.replace(prev, old_prev)
+        try:
+            os.replace(cur, prev)
+        except OSError:
+            if old_prev.exists():
+                os.replace(old_prev, prev)
+            shutil.rmtree(new, ignore_errors=True)
+            raise RuntimeError("bin_lewd is in use. Close the game and try again.")
+        shutil.rmtree(old_prev, ignore_errors=True)
+    os.replace(new, cur)
+    mod = Path(mods_dir) / EXES_MOD
+    mod.mkdir(parents=True, exist_ok=True)
+    if (mod / "db").exists():
+        shutil.rmtree(mod / "db")
+    if (Path(pkg) / "db").is_dir():
+        shutil.copytree(Path(pkg) / "db", mod / "db")
+    (mod / "meta.ini").write_text(
+        "[General]\ngameName=stalkeranomaly\nmodid=0\nversion=%s\ninstallationFile=%s\n"
+        "comments=installed by LEWD Addon Manager (LEWD Modded Exes gamedata)\n" % (manifest["version"], manifest["zip"]),
+        "utf-8")
+    return manifest["version"]
+
+
+def exes_rollback(game_dir):
+    """Swap bin_lewd and bin_lewd.prev. -> the version now active."""
+    game = Path(game_dir)
+    cur, prev, tmp = game / EXES_BIN, game / (EXES_BIN + ".prev"), game / (EXES_BIN + ".swap")
+    if not prev.is_dir():
+        raise RuntimeError("There is no previous build to roll back to.")
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    try:
+        if cur.exists():
+            os.replace(cur, tmp)
+        os.replace(prev, cur)
+        if tmp.exists():
+            os.replace(tmp, prev)
+    except OSError:
+        raise RuntimeError("bin_lewd is in use. Close the game and try again.")
+    return exes_installed(game_dir)
+
+
+def exes_redirect(game_dir, path):
+    """bin/X.exe -> bin_lewd/X.exe when that exists, else None."""
+    try:
+        p = Path(path).resolve()
+        if p.suffix.lower() != ".exe" or p.parent != (Path(game_dir) / "bin").resolve():
+            return None
+        cand = Path(game_dir) / EXES_BIN / p.name
+        return cand if cand.is_file() else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def human(n):
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024 or unit == "GB":
@@ -325,8 +493,12 @@ collection). Close the window and it stays quiet about that version.</li>
 <li>To remove an addon, delete its mod in MO2 like any other.</li>
 <li>Settings (MO2 &gt; Settings &gt; Plugins &gt; LEWD Addon Manager): update notices, HD icons, offer installer picks.</li>
 </ul>
-<p>The plugin updates itself when a new version is out (you are asked first). It never touches your game exes or
-any mod that is not a LEWD addon.</p>
+<p><b>LEWD Modded Exes</b> (button in this window): the LEWD engine build. It is installed into its own
+<code>bin_lewd</code> folder next to <code>bin</code>, which stays untouched (so GAMMA updates can't break it), and MO2
+starts it whenever you start the game as usual. Its gamedata is the mod "Modded Exes - LEWD" at the top of the list
+(lowest priority). You can switch back to the stock exes or roll back to the previous build in the same window.</p>
+<p>The plugin updates itself when a new version is out (you are asked first). Apart from <code>bin_lewd</code> it never
+touches your game folder, and it never changes a mod that is not a LEWD addon.</p>
 """
 
 
@@ -342,7 +514,7 @@ except ImportError:  # running the core tests outside MO2
 if mobase is not None:
 
     class AddonDialog(QDialog):
-        def __init__(self, parent, manifest, installed, preselect=(), intro=None):
+        def __init__(self, parent, manifest, installed, preselect=(), intro=None, exes_cb=None):
             super().__init__(parent)
             self.setWindowTitle("LEWD Addons")
             self.resize(820, 520)
@@ -365,6 +537,8 @@ if mobase is not None:
                 have = installed.get(a["id"])
                 hv = have["version"] if have else ""
                 state = "" if not have else ("up to date" if vtuple(hv) >= vtuple(a["version"]) else "update")
+                if a.get("test"):
+                    state = (state + ", " if state else "") + "TEST BUILD"
                 it = QTreeWidgetItem(pack, [a.get("name", a["id"]), human(a.get("size", 0)), hv, a["version"], state])
                 it.setToolTip(0, a.get("description", ""))
                 it.setToolTip(4, a.get("description", ""))
@@ -376,6 +550,10 @@ if mobase is not None:
             help_btn = bb.addButton("What is this?", QDialogButtonBox.ButtonRole.HelpRole)
             help_btn.setToolTip("What the LEWD Addon Manager does and when it shows up")
             help_btn.clicked.connect(lambda: QMessageBox.information(self, "LEWD Addon Manager", HELP_HTML))
+            if exes_cb is not None:
+                exes_btn = bb.addButton("LEWD Modded Exes...", QDialogButtonBox.ButtonRole.ActionRole)
+                exes_btn.setToolTip("Install or update the LEWD engine build, switch to the stock exes or roll back")
+                exes_btn.clicked.connect(lambda: (self.reject(), exes_cb()))
             ok_btn = bb.addButton("Install / update ticked", QDialogButtonBox.ButtonRole.AcceptRole)
             ok_btn.setToolTip("Download the ticked addons (and anything they need), check them and install each as "
                               "its own mod, below the mod it belongs to")
@@ -405,7 +583,9 @@ if mobase is not None:
         # --- plugin boilerplate
         def init(self, organizer):
             self._org = organizer
-            organizer.onUserInterfaceInitialized(lambda win: QTimer.singleShot(3000, lambda: self._check_markers(True)))
+            organizer.onUserInterfaceInitialized(lambda win: (QTimer.singleShot(3000, lambda: self._check_markers(True)),
+                                                              QTimer.singleShot(6000, lambda: self._check_exes(False))))
+            organizer.onAboutToRun(self._on_about_to_run)
             ml = organizer.modList()
             if hasattr(ml, "onModInstalled"):
                 ml.onModInstalled(lambda mod: QTimer.singleShot(1500, self._check_markers))
@@ -430,7 +610,13 @@ if mobase is not None:
             return [mobase.PluginSetting("manifest_url", "Addon list URL (https:// or file:///)", DEFAULT_MANIFEST),
                     mobase.PluginSetting("ask_on_start", "Offer addons picked in a FOMOD", True),
                     mobase.PluginSetting("check_updates", "Tell me about new addon versions when MO2 starts", True),
-                    mobase.PluginSetting("hd_icons", "Install the HD icons that come with addons", True)]
+                    mobase.PluginSetting("hd_icons", "Install the HD icons that come with addons", True),
+                    mobase.PluginSetting("test_builds", "Testers: offer test builds when this PC's GitHub sign-in has "
+                                         "access to the private LEWD staging repo (does nothing otherwise)", True),
+                    mobase.PluginSetting("exes_updates", "Offer new LEWD Modded Exes when MO2 starts", True),
+                    mobase.PluginSetting("use_lewd_exes", "Start the LEWD Modded Exes (bin_lewd) in place of the "
+                                         "stock exes in bin", True),
+                    mobase.PluginSetting("exes_manifest_url", "LEWD Modded Exes release info URL", EXES_MANIFEST)]
 
         def displayName(self):
             return "LEWD Addons"
@@ -458,7 +644,21 @@ if mobase is not None:
             override = Path(__file__).with_suffix(".url")  # dev/test: lewd_addon_manager.url next to the plugin
             if url == DEFAULT_MANIFEST and override.is_file():
                 url = override.read_text("utf-8").strip() or url
-            self._manifest = fetch_manifest(url)
+            public = staging = err = None
+            try:
+                public = fetch_manifest(url)
+            except Exception as e:
+                err = e
+            if self._org.pluginSetting(self.name(), "test_builds"):
+                surl = staging_asset_url("index.json", "addons-")
+                if surl:
+                    try:
+                        staging = fetch_manifest(surl)
+                    except Exception:
+                        staging = None
+            if public is None and staging is None:
+                raise err
+            self._manifest = merge_manifests(public, staging)
             return self._manifest
 
         def _check_markers(self, startup=False):
@@ -531,7 +731,8 @@ if mobase is not None:
                 return
             self._offer_plugin_update(manifest)
             installed = scan_mods(self._mods_dir(), manifest, self._active())
-            dlg = AddonDialog(self._parent, manifest, installed, preselect=wanted_markers(self._mods_dir()).keys())
+            dlg = AddonDialog(self._parent, manifest, installed, preselect=wanted_markers(self._mods_dir()).keys(),
+                              exes_cb=self._exes_panel)
             if dlg.exec():
                 self._install(dlg.picked(), manifest, installed)
 
@@ -648,6 +849,191 @@ if mobase is not None:
                                     "Installed and enabled:\n" + "\n".join(n for _, n in done) +
                                     ("\n\nAlso ticked (it was installed but not enabled):\n" + "\n".join(woke)
                                      if woke else ""))
+
+
+        # --- LEWD Modded Exes
+        def _game_dir(self):
+            return Path(self._org.managedGame().gameDirectory().absolutePath())
+
+        def _exes_url(self):
+            return self._org.pluginSetting(self.name(), "exes_manifest_url") or EXES_MANIFEST
+
+        def _fetch_best_exes(self):
+            """Public lewd-exes.json, or the staging one when this PC has tester access and it is newer.
+            The url it came from is kept in manifest["_url"] (the zip is next to it)."""
+            best, err = None, None
+            try:
+                best = fetch_exes_manifest(self._exes_url())
+                best["_url"] = self._exes_url()
+            except Exception as e:
+                err = e
+            if self._org.pluginSetting(self.name(), "test_builds"):
+                surl = staging_asset_url("lewd-exes.json", "exes-")
+                if surl:
+                    try:
+                        st = fetch_exes_manifest(surl)
+                        if best is None or vtuple(st["version"]) > vtuple(best["version"]):
+                            st["_url"], st["test"] = surl, True
+                            best = st
+                    except Exception:
+                        pass
+            if best is None:
+                raise err
+            return best
+
+        def _on_about_to_run(self, path, *rest):
+            """MO2 is about to start bin/X.exe: start bin_lewd/X.exe instead when it exists and the setting is on."""
+            try:
+                if not self._org.pluginSetting(self.name(), "use_lewd_exes"):
+                    return True
+                target = exes_redirect(self._game_dir(), path)
+                if target is None:
+                    return True
+                args = rest[1] if len(rest) >= 2 and isinstance(rest[1], str) else ""
+                self._org.startApplication(str(target), [args] if args else [], str(target.parent))
+                return False
+            except Exception:
+                return True  # any problem: let the stock exe run
+
+        def _check_exes(self, manual):
+            """Load lewd-exes.json in the background, then offer an install/update (never a downgrade)."""
+            if not manual and not self._org.pluginSetting(self.name(), "exes_updates"):
+                return
+            box = {}
+
+            def work():
+                try:
+                    box["m"] = self._fetch_best_exes()
+                except Exception as e:
+                    box["e"] = e
+
+            t = threading.Thread(target=work, daemon=True)
+            t.start()
+            timer = QTimer(self._parent)
+
+            def poll():
+                if t.is_alive():
+                    return
+                timer.stop()
+                timer.deleteLater()
+                if "e" in box:
+                    if manual:
+                        QMessageBox.warning(self._parent, "LEWD Modded Exes", "Could not load the release info:\n%s" % box["e"])
+                    return
+                self._offer_exes(box["m"], manual)
+
+            timer.timeout.connect(poll)
+            timer.start(250)
+
+        def _offer_exes(self, manifest, manual):
+            have = exes_installed(self._game_dir())
+            new = manifest["version"]
+            if have and vtuple(new) <= vtuple(have):
+                if manual:
+                    QMessageBox.information(self._parent, "LEWD Modded Exes", "You have the newest build (%s)." % have)
+                return
+            # Updates are asked once per version; the first install only once ever (or when a mod asks for it
+            # with the FOMOD marker lewd_addons/want/lewd.exes). The LEWD Addons window can always install.
+            wanted = "lewd.exes" in wanted_markers(self._mods_dir())
+            key = ("exes@" + new) if have else ("exes@first" if not wanted else "exes@want@" + new)
+            dismissed = set(json.loads(self._org.persistent(self.name(), "dismissed", "[]") or "[]"))
+            if not manual and key in dismissed:
+                return
+            if manifest.get("test"):
+                new += " (TEST BUILD)"
+            if have:
+                text = "LEWD Modded Exes %s is out (you have %s). Update now?" % (new, have)
+            else:
+                text = ("Install the LEWD Modded Exes %s?\n\nThe LEWD engine build some LEWD mods need. They go into "
+                        "a separate bin_lewd folder; your bin folder stays as it is. MO2 then starts them whenever "
+                        "you start the game, and you can switch back any time in Tools > LEWD Addons." % new)
+            if QMessageBox.question(self._parent, "LEWD Modded Exes", text) != QMessageBox.StandardButton.Yes:
+                if not manual:
+                    self._org.setPersistent(self.name(), "dismissed", json.dumps(sorted(dismissed | {key})))
+                return
+            self._install_exes(manifest)
+
+        def _install_exes(self, manifest):
+            url = exes_zip_url(manifest.get("_url") or self._exes_url(), manifest)
+            dl_dir = Path(self._org.downloadsPath()) / "LEWD addons"
+            game, mods = self._game_dir(), self._mods_dir()
+            state = {"done": 0, "total": 0, "error": None, "version": None, "finished": False}
+            cancel = threading.Event()
+
+            def work():
+                try:
+                    f = download(url, dl_dir / manifest["zip"], None,
+                                 progress=lambda d, t: state.update(done=d, total=t), cancel=cancel)
+                    pkg = exes_extract(f, manifest, dl_dir / "lewd_exes_unpacked")
+                    state["version"] = exes_install(game, mods, pkg, manifest)
+                    shutil.rmtree(pkg, ignore_errors=True)
+                except Exception as e:
+                    state["error"] = e
+                state["finished"] = True
+
+            pd = QProgressDialog("Downloading LEWD Modded Exes...", "Cancel", 0, 1000, self._parent)
+            pd.setWindowTitle("LEWD Modded Exes")
+            pd.setWindowModality(Qt.WindowModality.WindowModal)
+            pd.canceled.connect(cancel.set)
+            threading.Thread(target=work, daemon=True).start()
+            timer = QTimer(pd)
+
+            def tick():
+                pd.setLabelText("LEWD Modded Exes %s\n%s / %s" % (manifest["version"], human(state["done"]),
+                                                                  human(state["total"])))
+                pd.setValue(int(1000 * state["done"] / state["total"]) if state["total"] else 0)
+                if state["finished"]:
+                    timer.stop()
+                    pd.close()
+                    if state["error"]:
+                        if not isinstance(state["error"], InterruptedError):
+                            QMessageBox.warning(self._parent, "LEWD Modded Exes",
+                                                "Install failed, your game was not changed:\n%s" % state["error"])
+                        return
+                    self._org.refresh(True)
+                    QTimer.singleShot(1500, lambda: self._place_exes_mod(state["version"], 0))
+
+            timer.timeout.connect(tick)
+            timer.start(200)
+            pd.show()
+
+        def _place_exes_mod(self, version, attempt):
+            ml = self._org.modList()
+            if EXES_MOD not in set(ml.allMods()) and attempt < 10:
+                QTimer.singleShot(1000, lambda: self._place_exes_mod(version, attempt + 1))
+                return
+            if EXES_MOD in set(ml.allMods()):
+                ml.setActive(EXES_MOD, True)
+                ml.setPriority(EXES_MOD, 0)  # lowest: every other mod wins over its files
+                self._org.refresh(True)
+            QMessageBox.information(self._parent, "LEWD Modded Exes",
+                                    "LEWD Modded Exes %s installed.\n\nStart the game from MO2 as usual. On the first "
+                                    "install, clear the shader cache once in the Anomaly launcher." % version)
+
+        def _exes_panel(self):
+            game = self._game_dir()
+            have = exes_installed(game) or "not installed"
+            on = bool(self._org.pluginSetting(self.name(), "use_lewd_exes"))
+            box = QMessageBox(self._parent)
+            box.setWindowTitle("LEWD Modded Exes")
+            box.setText("Installed: %s\nStarting: %s exes" % (have, "LEWD (bin_lewd)" if on else "stock (bin)"))
+            b_check = box.addButton("Install / update", QMessageBox.ButtonRole.AcceptRole)
+            b_toggle = box.addButton("Use stock exes" if on else "Use LEWD exes", QMessageBox.ButtonRole.ActionRole)
+            b_back = box.addButton("Roll back", QMessageBox.ButtonRole.ActionRole)
+            b_back.setEnabled((game / (EXES_BIN + ".prev")).is_dir())
+            box.addButton(QMessageBox.StandardButton.Close)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked == b_check:
+                self._check_exes(True)
+            elif clicked == b_toggle:
+                self._org.setPluginSetting(self.name(), "use_lewd_exes", not on)
+            elif clicked == b_back:
+                try:
+                    v = exes_rollback(game)
+                    QMessageBox.information(self._parent, "LEWD Modded Exes", "Rolled back to %s." % (v or "the previous build"))
+                except Exception as e:
+                    QMessageBox.warning(self._parent, "LEWD Modded Exes", str(e))
 
 
 def createPlugin():
